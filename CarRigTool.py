@@ -2,6 +2,7 @@ import maya.cmds as cmds
 import json
 import os
 import google.generativeai as genai
+import math # Added for pi
 
 # --- (Global variables) ---
 parts_attr = {}
@@ -58,13 +59,19 @@ def Create_UI(*args):
     Create_AI_Tab()
     cmds.setParent('..')
     
+    # --- NEW: TAB 6: Features ---
+    tab6 = cmds.scrollLayout('featuresTab', childResizable=True, backgroundColor=[0.22, 0.22, 0.22], height=550)
+    Create_Features_Tab()
+    cmds.setParent('..')
+    
     
     # Set tab labels
     cmds.tabLayout(tabs, edit=True, 
                    tabLabel=((tab1, 'Parts'), (tab2, 'Bone Data'), 
                             (tab3, 'Relations'), 
                             (tab4, 'Actions'),
-                            (tab5, 'AI Generator'))) 
+                            (tab5, 'AI Generator'),
+                            (tab6, 'Features'))) 
     
     return window
 
@@ -428,7 +435,7 @@ def Create_Bone_Transform_Controls(*args):
     cmds.setParent('..')
 
 
-# --- (No changes to Create_Relations_Tab) ---
+# --- MODIFIED: Create_Relations_Tab ---
 def Create_Relations_Tab(*args):
     """Tab 3: Relations - Parent-child relationships and constraints"""
     cmds.columnLayout(adjustableColumn=True, rowSpacing=10, columnAttach=('both', 5))
@@ -442,12 +449,26 @@ def Create_Relations_Tab(*args):
     cmds.columnLayout(adjustableColumn=True, rowSpacing=8, columnAttach=('both', 5))
     cmds.separator(height=5, style='none')
     
-    cmds.text(label='Set parent relationships between parts', align='left')
+    cmds.text(label='Set relationships between rig components', align='left')
     cmds.separator(height=5, style='in')
     
+    # --- NEW: Relation Mode Dropdown ---
+    cmds.rowLayout(numberOfColumns=2, adjustableColumn=2,
+                  columnAttach=[(1, 'right', 5), (2, 'both', 5)])
+    cmds.text(label='Relation Mode:', width=100, align='right')
+    cmds.optionMenu('relationModeMenu', label='')
+    cmds.menuItem(label='Controller -> Ctrl Group') # Default
+    cmds.menuItem(label='Controller -> Bone')
+    cmds.menuItem(label='Bone -> Ctrl Group')
+    cmds.menuItem(label='Bone -> Bone')
+    cmds.setParent('..')
+    
+    cmds.separator(height=5, style='in')
+    # --- END NEW ---
+
     cmds.rowLayout(numberOfColumns=3, adjustableColumn=2,
                   columnAttach=[(1, 'both', 5), (2, 'both', 5), (3, 'both', 5)])
-    cmds.text(label='Child:', width=60)
+    cmds.text(label='Child Part:', width=100, align='right')
     cmds.optionMenu('childPartMenu', label='')
     for part in parts:
         cmds.menuItem(label=part)
@@ -457,7 +478,7 @@ def Create_Relations_Tab(*args):
     
     cmds.rowLayout(numberOfColumns=3, adjustableColumn=2,
                   columnAttach=[(1, 'both', 5), (2, 'both', 5), (3, 'both', 5)])
-    cmds.text(label='Parent:', width=60)
+    cmds.text(label='Parent Part:', width=100, align='right')
     cmds.optionMenu('parentPartMenu', label='')
     cmds.menuItem(label='None')
     for part in parts:
@@ -471,8 +492,8 @@ def Create_Relations_Tab(*args):
     cmds.separator(height=3, style='none')
     
     cmds.radioCollection('constraintTypeCollection')
-    cmds.radioButton('directParentRadio', label='Direct (Group under Controller)', 
-                    select=True, annotation='Parent the child group directly under the parent controller')
+    cmds.radioButton('directParentRadio', label='Direct (Group under Parent Node)', 
+                    select=True, annotation='Parent the child node directly under the parent node')
     cmds.radioButton('parentConstraintRadio', label='Parent Constraint',
                     annotation='Use parent constraint (position and rotation)')
     cmds.radioButton('pointConstraintRadio', label='Point Constraint',
@@ -534,14 +555,23 @@ def Create_Relations_Tab(*args):
     cmds.separator(height=10, style='none')
     cmds.setParent('..')
 
-# --- (No changes to Relation functions) ---
-
+# --- MODIFIED: Apply_Parent_Relation ---
 def Apply_Parent_Relation(*args):
     """Saves the selected parent-child relation to the global list and applies it to the scene."""
     
     # 1. Read values from UI
     child = cmds.optionMenu('childPartMenu', q=True, v=True)
     parent = cmds.optionMenu('parentPartMenu', q=True, v=True)
+    
+    # --- Read Relation Mode ---
+    mode_label = cmds.optionMenu('relationModeMenu', q=True, v=True)
+    mode_map = {
+        'Controller -> Ctrl Group': 'ctrl-grp',
+        'Controller -> Bone': 'ctrl-bone',
+        'Bone -> Ctrl Group': 'bone-grp',
+        'Bone -> Bone': 'bone-bone'
+    }
+    relation_mode = mode_map.get(mode_label, 'ctrl-grp')
     
     if not child:
         cmds.warning("No child part selected.")
@@ -553,7 +583,7 @@ def Apply_Parent_Relation(*args):
     
     # 2. Translate label to key
     radio_map = {
-        'Direct (Group under Controller)': 'direct',
+        'Direct (Group under Parent Node)': 'direct',
         'Parent Constraint': 'parent',
         'Point Constraint': 'point',
         'Orient Constraint': 'orient',
@@ -567,35 +597,48 @@ def Apply_Parent_Relation(*args):
         cmds.warning(f"Cannot parent a part to itself: {child}")
         return
         
-    # 4. Find and remove any existing relation for this child
-    existing_rel = None
+    # 4. Check for duplicate relation
+    # MODIFIED: Check if exact same relation already exists (same child, parent, type, AND mode)
+    duplicate_found = False
     for rel in relations:
-        if rel['child'] == child:
-            existing_rel = rel
+        if (rel['child'] == child and 
+            rel['parent'] == parent and 
+            rel['type'] == constraint_type and 
+            rel['mode'] == relation_mode):
+            duplicate_found = True
             break
     
-    if existing_rel:
-        Remove_Relation_In_Scene(existing_rel) # Remove from scene
-        relations.remove(existing_rel)         # Remove from list
-        
-    # 5. Add new relation (if parent is not 'None')
-    if parent == 'None':
-        Update_Relations_Display()
-        print(f"Removed relation for child: {child}")
+    if duplicate_found:
+        cmds.warning(f"Relation already exists: {child} ({relation_mode}) -> {parent} [{constraint_type}]")
         return
         
+    # 5. If parent is 'None', remove ALL relations for this child
+    if parent == 'None':
+        # Remove all relations for this child
+        relations_to_remove = [rel for rel in relations if rel['child'] == child]
+        for rel in relations_to_remove:
+            Remove_Relation_In_Scene(rel)
+            relations.remove(rel)
+        Update_Relations_Display()
+        print(f"Removed all relations for child: {child}")
+        return
+        
+    # 6. Add new relation (multiple relations now allowed)
     new_relation = {
         'child': child,
         'parent': parent,
         'type': constraint_type,
+        'mode': relation_mode,
         'maintain_offset': maintain_offset
     }
     
     relations.append(new_relation)
-    Apply_Relation_In_Scene(new_relation) # Apply new one to scene
+    Apply_Relation_In_Scene(new_relation)
     Update_Relations_Display()
-    print(f"Applied relation: {child} -> {parent} ({constraint_type})")
+    print(f"Applied relation: {child} -> {parent} ({constraint_type}, {relation_mode})")
 
+
+# --- MODIFIED: Update_Relations_Display ---
 def Update_Relations_Display(*args):
     """Refreshes the 'relationsListUI' with data from the global 'relations' list."""
     if not cmds.textScrollList('relationsListUI', exists=True):
@@ -603,14 +646,36 @@ def Update_Relations_Display(*args):
         
     cmds.textScrollList('relationsListUI', e=True, removeAll=True)
     
+    # Group relations by child for better readability
+    relations_by_child = {}
     for rel in relations:
         child = rel['child']
-        parent = rel['parent']
-        rel_type = rel['type']
-        mo = rel['maintain_offset']
+        if child not in relations_by_child:
+            relations_by_child[child] = []
+        relations_by_child[child].append(rel)
+    
+    # Display grouped by child
+    for child in sorted(relations_by_child.keys()):
+        child_relations = relations_by_child[child]
         
-        display_string = f"{child}  <-  {parent}  [{rel_type}, MO={mo}]"
-        cmds.textScrollList('relationsListUI', e=True, append=display_string)
+        # Add separator if multiple relations per child
+        if len(child_relations) > 1:
+            cmds.textScrollList('relationsListUI', e=True, 
+                              append=f"--- {child} ({len(child_relations)} relations) ---")
+        
+        for rel in child_relations:
+            parent = rel['parent']
+            rel_type = rel['type']
+            rel_mode = rel.get('mode', 'ctrl-grp')
+            mo = rel['maintain_offset']
+            
+            display_string = f"  [{rel_mode}] {child} <- {parent} [{rel_type}, MO={mo}]"
+            cmds.textScrollList('relationsListUI', e=True, append=display_string)
+    
+    # Update display to show total count
+    total_relations = len(relations)
+    unique_children = len(relations_by_child)
+    print(f"Relations Display: {total_relations} total relations for {unique_children} parts")
 
 def Remove_Selected_Relation(*args):
     """Removes the selected relation from the UI, the global list, and the scene."""
@@ -627,9 +692,10 @@ def Remove_Selected_Relation(*args):
         rel_to_remove = relations.pop(selected_index_0based)
         Remove_Relation_In_Scene(rel_to_remove)
         Update_Relations_Display()
-        print(f"Removed relation: {rel_to_remove['child']} -> {rel_to_remove['parent']}")
+        print(f"Removed relation: {rel_to_remove['child']} ({rel_to_remove['mode']}) -> {rel_to_remove['parent']}")
     else:
         cmds.warning("Selected index out of bounds. Please refresh.")
+
 
 def Clear_All_Relations(*args):
     """Removes ALL relations from the list and the scene after confirmation."""
@@ -647,79 +713,156 @@ def Clear_All_Relations(*args):
         Update_Relations_Display()
         print("All relations cleared.")
 
+# --- MODIFIED: Apply_Relation_In_Scene ---
 def Apply_Relation_In_Scene(relation_dict):
     """Applies a single relation to the live rig nodes in the scene."""
     child_part = relation_dict['child']
     parent_part = relation_dict['parent']
     rel_type = relation_dict['type']
+    rel_mode = relation_dict.get('mode', 'ctrl-grp')
     mo = relation_dict['maintain_offset']
     
-    # Get node names from parts_attr
+    # Get all potential nodes
     child_grp = parts_attr.get(child_part, {}).get('grp')
+    child_bone = parts_attr.get(child_part, {}).get('relative_bone')
     parent_ctrl = parts_attr.get(parent_part, {}).get('ctrl', [None])[0]
+    parent_bone = parts_attr.get(parent_part, {}).get('relative_bone')
     
+    # Determine driver (parent) and target (child) nodes
+    driver_node = None
+    target_node = None
+    
+    if rel_mode == 'ctrl-grp':
+        driver_node = parent_ctrl
+        target_node = child_grp
+    elif rel_mode == 'ctrl-bone':
+        driver_node = parent_ctrl
+        target_node = child_bone
+    elif rel_mode == 'bone-grp':
+        driver_node = parent_bone
+        target_node = child_grp
+    elif rel_mode == 'bone-bone':
+        driver_node = parent_bone
+        target_node = child_bone
+
     # Check if nodes exist
-    if not child_grp or not cmds.objExists(child_grp):
-        print(f"Apply Relation: Child group for '{child_part}' not found. Skipping.")
+    if not target_node or not cmds.objExists(target_node):
+        print(f"Apply Relation: Target node for '{child_part}' ({rel_mode}) not found. Skipping.")
         return
-    if not parent_ctrl or not cmds.objExists(parent_ctrl):
-        print(f"Apply Relation: Parent controller for '{parent_part}' not found. Skipping.")
+    if not driver_node or not cmds.objExists(driver_node):
+        print(f"Apply Relation: Driver node for '{parent_part}' ({rel_mode}) not found. Skipping.")
         return
 
-    # First, remove any existing relations on this child
-    Remove_Relation_In_Scene(relation_dict)
+    # MODIFIED: Only remove if it's a 'direct' parent type (can't have multiple)
+    # Constraints can be stacked, so we don't remove existing ones
+    if rel_type == 'direct':
+        # Check if already has a parent
+        current_parent = cmds.listRelatives(target_node, parent=True)
+        if current_parent:
+            print(f"Unparenting {target_node} from {current_parent[0]} for direct parenting")
+            try:
+                cmds.parent(target_node, world=True)
+            except Exception as e:
+                cmds.warning(f"Could not unparent {target_node}: {str(e)}")
 
     # Apply new relation
-    print(f"Applying {rel_type} constraint: {parent_ctrl} -> {child_grp}")
+    print(f"Applying {rel_type} constraint ({rel_mode}): {driver_node} -> {target_node}")
     try:
         if rel_type == 'direct':
-            cmds.parent(child_grp, parent_ctrl)
+            cmds.parent(target_node, driver_node)
         elif rel_type == 'parent':
-            cmds.parentConstraint(parent_ctrl, child_grp, mo=mo)
+            cmds.parentConstraint(driver_node, target_node, mo=mo)
         elif rel_type == 'point':
-            cmds.pointConstraint(parent_ctrl, child_grp, mo=mo)
+            cmds.pointConstraint(driver_node, target_node, mo=mo)
         elif rel_type == 'orient':
-            cmds.orientConstraint(parent_ctrl, child_grp, mo=mo)
+            cmds.orientConstraint(driver_node, target_node, mo=mo)
         elif rel_type == 'scale':
-            cmds.scaleConstraint(parent_ctrl, child_grp, mo=mo)
+            cmds.scaleConstraint(driver_node, target_node, mo=mo)
         elif rel_type == 'all':
-            cmds.parentConstraint(parent_ctrl, child_grp, mo=mo)
-            cmds.scaleConstraint(parent_ctrl, child_grp, mo=mo)
+            cmds.parentConstraint(driver_node, target_node, mo=mo)
+            cmds.scaleConstraint(driver_node, target_node, mo=mo)
     except Exception as e:
-        cmds.warning(f"Failed to apply relation {parent_ctrl} -> {child_grp}: {str(e)}")
+        cmds.warning(f"Failed to apply relation {driver_node} -> {target_node}: {str(e)}")
 
 
+# --- MODIFIED: Remove_Relation_In_Scene ---
 def Remove_Relation_In_Scene(relation_dict):
-    """Finds and removes any constraints or direct parenting on the child part's group."""
+    """Removes a specific relation from the scene based on the relation dictionary."""
     child_part = relation_dict['child']
-    child_grp = parts_attr.get(child_part, {}).get('grp')
+    parent_part = relation_dict['parent']
+    rel_type = relation_dict['type']
+    rel_mode = relation_dict.get('mode', 'ctrl-grp')
     
-    if not child_grp or not cmds.objExists(child_grp):
-        # Child group doesn't exist, nothing to remove
+    # Get all potential nodes based on mode
+    child_grp = parts_attr.get(child_part, {}).get('grp')
+    child_bone = parts_attr.get(child_part, {}).get('relative_bone')
+    parent_ctrl = parts_attr.get(parent_part, {}).get('ctrl', [None])[0]
+    parent_bone = parts_attr.get(parent_part, {}).get('relative_bone')
+    
+    # Determine target node based on mode
+    target_node = None
+    driver_node = None
+    
+    if rel_mode == 'ctrl-grp':
+        driver_node = parent_ctrl
+        target_node = child_grp
+    elif rel_mode == 'ctrl-bone':
+        driver_node = parent_ctrl
+        target_node = child_bone
+    elif rel_mode == 'bone-grp':
+        driver_node = parent_bone
+        target_node = child_grp
+    elif rel_mode == 'bone-bone':
+        driver_node = parent_bone
+        target_node = child_bone
+    
+    if not target_node or not cmds.objExists(target_node):
+        print(f"Remove Relation: Target node for '{child_part}' ({rel_mode}) not found.")
+        return
+    
+    if not driver_node or not cmds.objExists(driver_node):
+        print(f"Remove Relation: Driver node for '{parent_part}' ({rel_mode}) not found.")
         return
 
-    # 1. Delete constraints
-    # Find constraints targeting the child group
-    constraints = cmds.listRelatives(child_grp, type='constraint', allDescendents=False)
-    if constraints:
-        print(f"Removing constraints from {child_grp}: {constraints}")
-        try:
-            cmds.delete(constraints)
-        except Exception as e:
-            cmds.warning(f"Could not delete constraints: {str(e)}")
-
-    # 2. Unparent from direct parenting
-    current_parent = cmds.listRelatives(child_grp, parent=True)
-    if current_parent:
-        # Check if parent is a known controller
-        all_ctrl_names = [parts_attr[p]['ctrl'][0] for p in parts_attr if 'ctrl' in parts_attr[p] and parts_attr[p]['ctrl']]
-        if current_parent[0] in all_ctrl_names:
-            print(f"Unparenting {child_grp} from {current_parent[0]}")
+    # Handle direct parenting
+    if rel_type == 'direct':
+        current_parent = cmds.listRelatives(target_node, parent=True)
+        if current_parent and current_parent[0] == driver_node:
+            print(f"Unparenting {target_node} from {driver_node}")
             try:
-                cmds.parent(child_grp, world=True)
+                cmds.parent(target_node, world=True)
             except Exception as e:
-                # This might fail if it's locked, but we try
-                cmds.warning(f"Could not unparent {child_grp}: {str(e)}")
+                cmds.warning(f"Could not unparent {target_node}: {str(e)}")
+    
+    # Handle constraints - find and remove specific constraint connected to this driver
+    else:
+        constraint_types = {
+            'parent': 'parentConstraint',
+            'point': 'pointConstraint',
+            'orient': 'orientConstraint',
+            'scale': 'scaleConstraint',
+            'all': ['parentConstraint', 'scaleConstraint']
+        }
+        
+        types_to_check = constraint_types.get(rel_type, [])
+        if not isinstance(types_to_check, list):
+            types_to_check = [types_to_check]
+        
+        for constraint_type in types_to_check:
+            # Find constraints of this type on the target
+            constraints = cmds.listRelatives(target_node, type=constraint_type) or []
+            
+            for constraint in constraints:
+                # Check if this constraint is driven by our driver_node
+                connections = cmds.listConnections(constraint, source=True, destination=False) or []
+                
+                if driver_node in connections:
+                    print(f"Removing constraint {constraint} from {target_node}")
+                    try:
+                        cmds.delete(constraint)
+                    except Exception as e:
+                        cmds.warning(f"Could not delete constraint {constraint}: {str(e)}")
+
 
 def Apply_All_Relations_To_Scene(*args):
     """Loops through the global 'relations' list and applies each one."""
@@ -729,7 +872,7 @@ def Apply_All_Relations_To_Scene(*args):
     print("Finished applying relations.")
 
 
-# --- NEW FUNCTION ---
+# --- (No changes to Toggle_All_Frames) ---
 def Toggle_All_Frames(frame_key, collapse_state, *args):
     """
     Collapses or expands all frames stored in parts_attr under a specific key.
@@ -789,10 +932,12 @@ def Create_Actions_Tab(*args):
     cmds.separator(height=10, style='none')
     
     cmds.button(label='Select All Controllers', 
+               command=Select_All_Ctrls, # --- MODIFIED --- Added command
                height=35,
                backgroundColor=[0.45, 0.45, 0.5])
     
-    cmds.button(label='Reset Controllers', 
+    cmds.button(label='Reset Controllers',
+               command=Reset_All_Ctrls, # --- MODIFIED --- Added command
                height=35,
                backgroundColor=[0.5, 0.5, 0.4])
     
@@ -832,8 +977,7 @@ def Create_Actions_Tab(*args):
     cmds.setParent('..')
 
 
-# --- (No changes to Create_AI_Tab and AI functions) ---
-
+# --- MODIFIED: Create_AI_Tab ---
 def Create_AI_Tab(*args):
     """Tab 5: AI Generator"""
     cmds.columnLayout(adjustableColumn=True, rowSpacing=10, columnAttach=('both', 5))
@@ -852,6 +996,7 @@ def Create_AI_Tab(*args):
     cmds.menuItem(label='Google Gemini')
     cmds.menuItem(label='OpenAI GPT')
     cmds.menuItem(label='Anthropic Claude')
+    cmds.menuItem(label='Perplexity') # --- NEW ---
     cmds.menuItem(label='Custom API')
 
     cmds.separator(height=5, style='none')
@@ -917,6 +1062,7 @@ def Create_AI_Tab(*args):
     cmds.setParent('..')
 
 
+# --- MODIFIED: update_ai_provider_help ---
 def update_ai_provider_help(*args):
     """Update help text based on selected provider"""
     try:
@@ -926,6 +1072,7 @@ def update_ai_provider_help(*args):
             'Google Gemini': 'Enter your Gemini API key and optionally specify a model (default: gemini-2.0-flash-exp)',
             'OpenAI GPT': 'Enter your OpenAI API key and optionally specify a model (default: gpt-4o-mini)',
             'Anthropic Claude': 'Enter your Anthropic API key and optionally specify a model (default: claude-3-5-sonnet-20241022)',
+            'Perplexity': 'Enter your Perplexity API key and specify a model (default: llama-3-sonar-small-32k-chat)', # --- NEW ---
             'Custom API': 'For Hugging Face: Enter HF token as API key and model name (e.g., mistralai/Mistral-7B-Instruct-v0.2)\nFor other APIs: Enter full endpoint URL in Model Name field'
         }
         
@@ -947,16 +1094,15 @@ def Generate_With_AI(*args):
                   backgroundColor=[0.5, 0.2, 0.2])
         return
         
-    cmds.text('aiStatusText', e=True, label='Status: Calling AI model... (Using placeholder)',
+    cmds.text('aiStatusText', e=True, label='Status: Calling AI model...',
               backgroundColor=[0.6, 0.4, 0.2])
     
     try:
-        # 2. Call the (placeholder) AI model
-        #    This function returns a Python dictionary, not a JSON string
+        # 2. Call the AI model
         ai_generated_data = call_ai_model(prompt)
         
         if not ai_generated_data:
-            cmds.warning("AI (placeholder) returned no data.")
+            cmds.warning("AI returned no data.")
             cmds.text('aiStatusText', e=True, label='Status: Error - AI returned no data.',
                       backgroundColor=[0.5, 0.2, 0.2])
             return
@@ -965,7 +1111,6 @@ def Generate_With_AI(*args):
                   backgroundColor=[0.2, 0.5, 0.3])
                   
         # 3. Load the data into the tool
-        #    This function is shared with the Import button
         Load_Config_Data(ai_generated_data)
         
         cmds.text('aiStatusText', e=True, label=f"Status: Success! Loaded {len(ai_generated_data.get('parts', []))} parts.",
@@ -981,6 +1126,7 @@ def Generate_With_AI(*args):
             defaultButton='OK'
         )
 
+# --- MODIFIED: call_ai_model ---
 def call_ai_model(prompt):
     """
     Unified AI caller that reads provider, api key, and model from the UI and returns a Python dict.
@@ -989,6 +1135,7 @@ def call_ai_model(prompt):
       - Google Gemini (google.generativeai as genai)
       - OpenAI (supports both pre-1.0 and post-1.0 openai-python interfaces)
       - Anthropic (claude)
+      - Perplexity (NEW)
       - Custom API (Hugging Face, local models, etc.)
     """
     # Read UI values (graceful fallbacks)
@@ -1222,7 +1369,8 @@ def call_ai_model(prompt):
                         model=model_name,
                         messages=messages,
                         temperature=0.0,
-                        max_tokens=1200
+                        max_tokens=1200,
+                        response_format={"type": "json_object"} # Request JSON
                     )
                     
                     text = extract_text_from_response(resp)
@@ -1291,6 +1439,58 @@ def call_ai_model(prompt):
 
         except Exception as e:
             raise Exception(f"Anthropic API error: {str(e)}")
+
+    # ----------------------------
+    # --- NEW: Perplexity branch ---
+    # ----------------------------
+    elif 'perplexity' in provider_lower:
+        try:
+            try:
+                import requests
+            except ImportError:
+                raise Exception("requests package not installed. Install it (pip install requests).")
+            
+            api_url = "https://api.perplexity.ai/chat/completions"
+            
+            if not model_name:
+                model_name = 'llama-3-sonar-small-32k-chat'
+                
+            headers = {
+                "Authorization": f"Bearer {API_KEY}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "model": model_name,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+            }
+            
+            print(f"Perplexity API: Calling {api_url} with model {model_name}")
+            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+            
+            if response.status_code == 401:
+                raise Exception("Invalid Perplexity API key.")
+            elif response.status_code != 200:
+                error_detail = response.text
+                try:
+                    error_json = response.json()
+                    error_detail = error_json.get('error', {}).get('message', error_detail)
+                except:
+                    pass
+                raise Exception(f"Perplexity API failed with status {response.status_code}:\n{error_detail}")
+
+            result = response.json()
+            
+            # Response is OpenAI compatible, so we can reuse the extractors
+            text = extract_text_from_response(result)
+            ai_data = extract_json_from_text(text)
+            return ai_data
+
+        except Exception as e:
+            raise Exception(f"Perplexity API error: {str(e)}")
 
     # ----------------------------
     # Custom API branch (Hugging Face, local models, etc.)
@@ -1466,8 +1666,256 @@ def call_ai_model(prompt):
             raise Exception(f"Custom API error: {str(e)}")
 
     else:
-        raise Exception(f"Provider '{provider}' not supported. Choose Google Gemini, OpenAI GPT, Anthropic Claude, or Custom API.")
-# --- END NEW AI TAB FUNCTIONS ---
+        # --- MODIFIED: Updated error message ---
+        raise Exception(f"Provider '{provider}' not supported. Choose Google Gemini, OpenAI GPT, Anthropic Claude, Perplexity, or Custom API.")
+# --- END AI TAB FUNCTIONS ---
+
+
+# --- NEW: FEATURES TAB FUNCTIONS ---
+
+def Create_Features_Tab(*args):
+    """Tab 6: Features - Apply complex rig behaviors"""
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=10, columnAttach=('both', 5))
+    
+    cmds.separator(height=5, style='none')
+    
+    # --- Feature Selection Section ---
+    cmds.frameLayout(label='Car Features', collapsable=False,
+                     backgroundColor=[0.25, 0.25, 0.25],
+                     marginWidth=5, marginHeight=10)
+    cmds.columnLayout(adjustableColumn=True, rowSpacing=8, columnAttach=('both', 5))
+    
+    cmds.text(label='Select Feature:', align='left')
+    cmds.optionMenu('featureSelectMenu', label='', changeCommand=Show_Feature_Settings)
+    cmds.menuItem(label='-- Select a Feature --')
+    cmds.menuItem(label='Wheel Rig (Move & Steer)')
+    # Add more features here in the future
+    # cmds.menuItem(label='Automatic Suspension') 
+    
+    cmds.separator(height=10, style='in')
+    
+    cmds.text(label='--- Feature Settings ---', font='boldLabelFont')
+    
+    # This layout will be populated by Show_Feature_Settings
+    cmds.columnLayout('featureSettingsLayout', adjustableColumn=True, rowSpacing=8,
+                       visible=False) 
+    cmds.setParent('..') # Back to frame's column layout
+    
+    cmds.setParent('..') # Back to frame
+    cmds.setParent('..') # Back to tab's main column
+    
+    # Call once to initialize (will show nothing)
+    Show_Feature_Settings()
+
+
+def Show_Feature_Settings(*args):
+    """Shows the settings UI for the currently selected feature."""
+    
+    settings_layout = 'featureSettingsLayout'
+    
+    # Clear any existing settings
+    children = cmds.columnLayout(settings_layout, q=True, childArray=True) or []
+    for child in children:
+        if cmds.layout(child, exists=True):
+            cmds.deleteUI(child)
+        elif cmds.control(child, exists=True):
+             cmds.deleteUI(child)
+             
+    # Get selected feature
+    try:
+        selected_feature = cmds.optionMenu('featureSelectMenu', q=True, v=True)
+    except Exception:
+        selected_feature = '-- Select a Feature --'
+
+    # Show/hide layout and populate
+    if selected_feature == '-- Select a Feature --':
+        cmds.columnLayout(settings_layout, e=True, visible=False)
+    else:
+        cmds.columnLayout(settings_layout, e=True, visible=True)
+        cmds.setParent(settings_layout) # Set parent for new UI elements
+        
+        if selected_feature == 'Wheel Rig (Move & Steer)':
+            Create_Wheel_Rig_Settings()
+        # Add other features with 'elif'
+        
+        cmds.setParent('..') # Back to tab's main column layout
+
+def Create_Wheel_Rig_Settings(*args):
+    """Creates the UI for the Wheel Rig feature."""
+    
+    # 1. Lead Controller
+    cmds.text(label='Lead Controller (Main Body/Chassis):', align='left')
+    cmds.optionMenu('wheelRig_LeadCtrl', label='')
+    cmds.menuItem(label='-- Select Part --')
+    for part in parts:
+        cmds.menuItem(label=part)
+        
+    cmds.separator(height=5, style='none')
+    
+    # 2. Follow Controllers
+    cmds.text(label='Follow Controllers (Wheels):', align='left')
+    cmds.textScrollList('wheelRig_FollowCtrls', allowMultiSelection=True, height=100)
+    for part in parts:
+        cmds.textScrollList('wheelRig_FollowCtrls', e=True, append=part)
+        
+    cmds.separator(height=5, style='none')
+
+    # 3. Wheel Radius
+    cmds.text(label='Wheel Radius (Approximate scene units):', align='left')
+    cmds.floatField('wheelRig_Radius', value=1.0, minValue=0.01, precision=3)
+    
+    cmds.separator(height=8, style='in')
+    
+    # 4. Movement Axis
+    cmds.text(label='Movement Axis (of Lead Ctrl):', align='left')
+    cmds.optionMenu('wheelRig_MoveAxis', label='')
+    cmds.menuItem(label='Translate Z') # Common forward axis
+    cmds.menuItem(label='Translate X')
+    cmds.menuItem(label='Translate Y')
+    
+    cmds.separator(height=5, style='none')
+    
+    # 5. Wheel Rotation Axis
+    cmds.text(label='Rotation Axis (of Wheels):', align='left')
+    cmds.optionMenu('wheelRig_WheelAxis', label='')
+    cmds.menuItem(label='Rotate X') # Common wheel axis
+    cmds.menuItem(label='Rotate Y')
+    cmds.menuItem(label='Rotate Z')
+    
+    cmds.separator(height=8, style='in')
+    
+    # 6. Steering Axis
+    cmds.text(label='Steering Axis (of Lead Ctrl):', align='left')
+    cmds.optionMenu('wheelRig_SteerAxis', label='')
+    cmds.menuItem(label='Rotate Y') # Common steer axis
+    cmds.menuItem(label='Rotate X')
+    cmds.menuItem(label='Rotate Z')
+    
+    cmds.separator(height=5, style='none')
+    
+    # 7. Wheel Steering Axis
+    cmds.text(label='Steering Axis (of Wheels):', align='left')
+    cmds.optionMenu('wheelRig_WheelSteerAxis', label='')
+    cmds.menuItem(label='Rotate Y') # Common steer axis
+    cmds.menuItem(label='Rotate X')
+    cmds.menuItem(label='Rotate Z')
+    
+    cmds.separator(height=10, style='in')
+    
+    # 8. Apply Button
+    cmds.button(label='Apply Wheel Rig', 
+                command=Apply_Wheel_Rig,
+                height=35,
+                backgroundColor=[0.3, 0.5, 0.7])
+
+def Apply_Wheel_Rig(*args):
+    """Applies the node connections for the wheel rig feature."""
+    try:
+        # --- 1. Get UI Values ---
+        lead_part = cmds.optionMenu('wheelRig_LeadCtrl', q=True, v=True)
+        follow_parts = cmds.textScrollList('wheelRig_FollowCtrls', q=True, selectItem=True)
+        radius = cmds.floatField('wheelRig_Radius', q=True, v=True)
+        
+        move_axis_label = cmds.optionMenu('wheelRig_MoveAxis', q=True, v=True)
+        wheel_axis_label = cmds.optionMenu('wheelRig_WheelAxis', q=True, v=True)
+        steer_axis_label = cmds.optionMenu('wheelRig_SteerAxis', q=True, v=True)
+        wheel_steer_axis_label = cmds.optionMenu('wheelRig_WheelSteerAxis', q=True, v=True)
+
+        # Attribute mapping
+        attr_map = {
+            'Translate X': 'tx', 'Translate Y': 'ty', 'Translate Z': 'tz',
+            'Rotate X': 'rx', 'Rotate Y': 'ry', 'Rotate Z': 'rz'
+        }
+        
+        move_attr = attr_map[move_axis_label]
+        wheel_attr = attr_map[wheel_axis_label]
+        steer_attr = attr_map[steer_axis_label]
+        wheel_steer_attr = attr_map[wheel_steer_axis_label]
+
+        # --- 2. Validation ---
+        if not lead_part or lead_part == '-- Select Part --':
+            cmds.warning("Please select a Lead Controller.")
+            return
+            
+        if not follow_parts:
+            cmds.warning("Please select at least one Follow Controller (Wheel).")
+            return
+            
+        if radius <= 0:
+            cmds.warning("Wheel Radius must be greater than 0.")
+            return
+            
+        lead_ctrl = parts_attr.get(lead_part, {}).get('ctrl', [None])[0]
+        if not lead_ctrl or not cmds.objExists(lead_ctrl):
+            cmds.warning(f"Lead Controller node for '{lead_part}' does not exist.")
+            return
+            
+        follow_ctrls = []
+        for part in follow_parts:
+            ctrl = parts_attr.get(part, {}).get('ctrl', [None])[0]
+            if not ctrl or not cmds.objExists(ctrl):
+                cmds.warning(f"Follow Controller node for '{part}' does not exist. Skipping.")
+                continue
+            follow_ctrls.append(ctrl)
+            
+        if not follow_ctrls:
+            cmds.warning("No valid Follow Controllers found.")
+            return
+
+        # --- 3. Implementation - Wheel Rotation ---
+        
+        # Rotation (degrees) = (Distance / Circumference) * 360
+        # Circumference = 2 * pi * radius
+        # Conversion Factor = 360 / (2 * pi * radius) = 180 / (pi * radius)
+        conversion_factor = 180.0 / (math.pi * radius)
+        
+        # Create a multiplyDivide node
+        md_node_name = f"{lead_part}_wheelRoll_md"
+        if cmds.objExists(md_node_name):
+            cmds.delete(md_node_name)
+            
+        md_node = cmds.shadingNode('multiplyDivide', asUtility=True, n=md_node_name)
+        
+        cmds.setAttr(f'{md_node}.operation', 1) # Multiply
+        cmds.setAttr(f'{md_node}.input2X', conversion_factor)
+        
+        # Connect lead controller's movement to the multiply node
+        cmds.connectAttr(f'{lead_ctrl}.{move_attr}', f'{md_node}.input1X')
+        
+        print(f"Created node {md_node}. Connecting {lead_ctrl}.{move_attr} to input1X.")
+
+        # Connect the output to all follow wheels
+        for follow_ctrl in follow_ctrls:
+            try:
+                cmds.connectAttr(f'{md_node}.outputX', f'{follow_ctrl}.{wheel_attr}')
+                print(f"Connected {md_node}.outputX to {follow_ctrl}.{wheel_attr}")
+            except Exception as e:
+                print(f"Warning: Could not connect to {follow_ctrl}.{wheel_attr}. Maybe already connected? {e}")
+
+        # --- 4. Implementation - Steering ---
+        print(f"Connecting steering: {lead_ctrl}.{steer_attr}...")
+        for follow_ctrl in follow_ctrls:
+            try:
+                cmds.connectAttr(f'{lead_ctrl}.{steer_attr}', f'{follow_ctrl}.{wheel_steer_attr}')
+                print(f"Connected {lead_ctrl}.{steer_attr} to {follow_ctrl}.{wheel_steer_attr}")
+            except Exception as e:
+                print(f"Warning: Could not connect to {follow_ctrl}.{wheel_steer_attr}. Maybe already connected? {e}")
+                
+        # --- 5. Feedback ---
+        cmds.confirmDialog(title='Feature Applied',
+                            message=f"Wheel Rig (Move & Steer) feature applied successfully!\n"
+                                    f"Created node: {md_node}",
+                            button=['OK'],
+                            defaultButton='OK')
+
+    except Exception as e:
+        cmds.warning(f"Failed to apply Wheel Rig: {e}")
+        cmds.confirmDialog(title='Error',
+                            message=f"Failed to apply Wheel Rig:\n{e}",
+                            button=['OK'],
+                            defaultButton='OK')
+
+# --- END NEW FEATURES TAB FUNCTIONS ---
 
 
 # --- (No changes to set_axis) ---
@@ -1542,7 +1990,15 @@ def Create_Bones(*args):
             is_enabled = cmds.checkBox(parts_attr[part]['isChecked'], q=True, v=True)
         
         if is_enabled:
-            parts_attr[part]['relative_bone'] = cmds.joint(n= part + '_jnt', p=(0, 0, 0))
+            # --- NEW: Clear selection before creating joint ---
+            cmds.select(clear=True) 
+            
+            bone_name = part + '_jnt'
+            # --- NEW: Delete old bone if it exists ---
+            if cmds.objExists(bone_name):
+                cmds.delete(bone_name)
+                
+            parts_attr[part]['relative_bone'] = cmds.joint(n=bone_name, p=(0, 0, 0))
             
             tx = parts_attr[part].get('bone_txValue', 0.0)
             ty = parts_attr[part].get('bone_tyValue', 0.0)
@@ -1580,7 +2036,8 @@ def Create_Bones(*args):
                 orient_z = cmds.floatField(parts_attr[part]['orient_z'], q=True, value=True)
             cmds.setAttr(parts_attr[part]['relative_bone'] + '.jointOrient', 
                        orient_x, orient_y, orient_z)
-        cmds.select(clear=True)
+                       
+        cmds.select(clear=True) # Clear selection after each joint
     
     print("Bones created successfully!")
 
@@ -1588,6 +2045,8 @@ def Create_Bones(*args):
 # --- (No changes to Create_Ctrls) ---
 def Create_Ctrls(*args):
     Save_UI_Values()
+    
+    ctrls.clear() # --- NEW: Clear global ctrls list
     
     for part in parts:
         is_enabled = parts_attr[part].get('isCheckedValue', True)
@@ -1600,10 +2059,18 @@ def Create_Ctrls(*args):
             shape = parts_attr[part].get('shapeValue', 'Circle')
             size = parts_attr[part].get('sizeValue', 1.0)
             ctrl_name = part + '_ctrl'
+            grp_name = part + '_grp'
+            
+            # --- NEW: Delete old ctrl/grp if they exist ---
+            if cmds.objExists(grp_name):
+                cmds.delete(grp_name)
+            if cmds.objExists(ctrl_name):
+                cmds.delete(ctrl_name)
+                
             new_ctrl_name = create_controller_shape(shape, ctrl_name, size, normal)
             
             parts_attr[part]['ctrl'] = [new_ctrl_name] 
-            parts_attr[part]['grp'] = cmds.group(str(parts_attr[part]['ctrl'][0]), name=part + '_grp')
+            parts_attr[part]['grp'] = cmds.group(str(parts_attr[part]['ctrl'][0]), name=grp_name)
             
             ctrls.append(str(parts_attr[part]['ctrl'][0]))
             
@@ -1676,62 +2143,50 @@ def Add_Custom_Part(*args):
     print(f"Added custom part: {custom_name}")
 
 
-# --- (No changes to Refresh_All_Tabs) ---
+# --- MODIFIED: Refresh_All_Tabs ---
 def Refresh_All_Tabs(*args):
-    """Refresh all tabs to show new parts"""
+    """Refresh all tabs to show new parts without closing window"""
     Save_UI_Values()
     
-    if cmds.scrollLayout('partsListScroll', exists=True):
-        cmds.deleteUI('partsListScroll', control=True)
-    # Find the parent of 'partsListScroll' - it's the column layout inside the frame
-    parent_col = cmds.frameLayout('partsTab|mainColumnLayout|partsTab|partsList|columnLayout', q=True, fullPathName=True) # This path might be fragile
+    print("Refreshing all tabs...")
     
-    # Let's try to make the parent structure more robust in Create_Parts_Tab
-    # For now, let's assume the hierarchy is correct.
-    
-    # Re-find parent layout more robustly
+    # Refresh Parts Tab
     if cmds.scrollLayout('partsTab', exists=True):
-        cmds.setParent('partsTab')
-        
-        # Need to delete the old scroll layout AND its container
-        if cmds.frameLayout('partsListFrame', exists=True): # Let's name the frame
-            cmds.deleteUI('partsListFrame')
-        
-        # --- This part is tricky. Let's rebuild the *contents* of the tabs
-        
-        # Delete old UI content
-        if cmds.scrollLayout('partsTab', exists=True):
-            children = cmds.scrollLayout('partsTab', q=True, childArray=True)
-            if children:
-                for child in children:
-                    cmds.deleteUI(child)
-        
-        if cmds.scrollLayout('boneDataTab', exists=True):
-            children = cmds.scrollLayout('boneDataTab', q=True, childArray=True)
-            if children:
-                for child in children:
-                    cmds.deleteUI(child)
-
-        if cmds.scrollLayout('relationsTab', exists=True):
-            children = cmds.scrollLayout('relationsTab', q=True, childArray=True)
-            if children:
-                for child in children:
-                    cmds.deleteUI(child)
-
-        # Re-create tab content
+        children = cmds.scrollLayout('partsTab', q=True, childArray=True) or []
+        for child in children:
+            if cmds.columnLayout(child, exists=True):
+                cmds.deleteUI(child)
         cmds.setParent('partsTab')
         Create_Parts_Tab()
-        
+    
+    # Refresh Bone Data Tab  
+    if cmds.scrollLayout('boneDataTab', exists=True):
+        children = cmds.scrollLayout('boneDataTab', q=True, childArray=True) or []
+        for child in children:
+            if cmds.columnLayout(child, exists=True):
+                cmds.deleteUI(child)
         cmds.setParent('boneDataTab')
         Create_Bone_Data_Tab()
-        
-        cmds.setParent('relationsTab')
-        Create_Relations_Tab() # This already handles dropdowns
-        
-        # Update dropdowns in Relations Tab (which is now rebuilt, so this is redundant)
-        # But Create_Relations_Tab reads the global 'parts' list, so it's fine.
     
-    print("UI Refreshed.")
+    # Refresh Relations Tab
+    if cmds.scrollLayout('relationsTab', exists=True):
+        children = cmds.scrollLayout('relationsTab', q=True, childArray=True) or []
+        for child in children:
+            if cmds.columnLayout(child, exists=True):
+                cmds.deleteUI(child)
+        cmds.setParent('relationsTab')
+        Create_Relations_Tab()
+        
+    # --- NEW: Refresh Features Tab ---
+    if cmds.scrollLayout('featuresTab', exists=True):
+        children = cmds.scrollLayout('featuresTab', q=True, childArray=True) or []
+        for child in children:
+            if cmds.columnLayout(child, exists=True):
+                cmds.deleteUI(child)
+        cmds.setParent('featuresTab')
+        Create_Features_Tab()
+    
+    print("All tabs refreshed successfully!")
 
 
 # --- (No changes to Save_UI_Values) ---
@@ -1760,27 +2215,77 @@ def Save_UI_Values(*args):
                     parts_attr[part][attr + 'Value'] = cmds.floatField(parts_attr[part][attr], q=True, value=True)
 
 
-# --- (No changes to Delete_Rig) ---
+# --- NEW: Utility Functions ---
+def Select_All_Ctrls(*args):
+    """Selects all currently existing controllers."""
+    all_ctrls = []
+    for part in parts:
+        if 'ctrl' in parts_attr[part]:
+            ctrl_name = parts_attr[part]['ctrl'][0]
+            if ctrl_name and cmds.objExists(ctrl_name):
+                all_ctrls.append(ctrl_name)
+    
+    if all_ctrls:
+        cmds.select(all_ctrls)
+    else:
+        cmds.warning("No controllers found to select.")
+
+def Reset_All_Ctrls(*args):
+    """Resets all controllers to their default transforms."""
+    print("Resetting controllers...")
+    for part in parts:
+        if 'ctrl' in parts_attr[part]:
+            ctrl_name = parts_attr[part]['ctrl'][0]
+            if ctrl_name and cmds.objExists(ctrl_name):
+                # Reset transforms
+                for attr in ['tx', 'ty', 'tz', 'rx', 'ry', 'rz']:
+                    try:
+                        cmds.setAttr(f"{ctrl_name}.{attr}", 0)
+                    except Exception:
+                        pass # Attribute might be locked
+                # Reset scale
+                for attr in ['sx', 'sy', 'sz']:
+                    try:
+                        cmds.setAttr(f"{ctrl_name}.{attr}", 1)
+                    except Exception:
+                        pass # Attribute might be locked
+    print("Controllers reset.")
+# --- END NEW UTILITY FUNCTIONS ---
+
+
+# --- MODIFIED: Delete_Rig ---
 def Delete_Rig(*args):
     """Delete all rig elements"""
     result = cmds.confirmDialog(title='Confirm Delete', 
-                                message='Are you sure you want to delete the entire rig?',
+                                message='Are you sure you want to delete the entire rig?\nThis will also remove feature nodes.',
                                 button=['Yes', 'No'],
                                 defaultButton='No',
                                 cancelButton='No',
                                 dismissString='No')
     
     if result == 'Yes':
+        to_delete = []
         for part in parts:
             if 'ctrl' in parts_attr[part]:
                 if parts_attr[part]['ctrl'] and cmds.objExists(str(parts_attr[part]['ctrl'][0])):
-                    cmds.delete(str(parts_attr[part]['ctrl'][0]))
+                    to_delete.append(str(parts_attr[part]['ctrl'][0]))
             if 'grp' in parts_attr[part]:
                 if cmds.objExists(parts_attr[part]['grp']):
-                    cmds.delete(parts_attr[part]['grp'])
+                    to_delete.append(parts_attr[part]['grp'])
             if 'relative_bone' in parts_attr[part]:
                 if cmds.objExists(parts_attr[part]['relative_bone']):
-                    cmds.delete(parts_attr[part]['relative_bone'])
+                    to_delete.append(parts_attr[part]['relative_bone'])
+            
+            # --- NEW: Find and delete feature nodes ---
+            md_node = f"{part}_wheelRoll_md"
+            if cmds.objExists(md_node):
+                to_delete.append(md_node)
+
+        if to_delete:
+            try:
+                cmds.delete(to_delete)
+            except Exception as e:
+                cmds.warning(f"Error during deletion: {e}")
         
         ctrls.clear()
         for part in parts_attr:
@@ -1796,6 +2301,7 @@ def Delete_Rig(*args):
 
 # --- (No changes to Build_Full_Rig) ---
 def Build_Full_Rig(*args):
+    Delete_Rig() # --- NEW: Call Delete_Rig first to ensure a clean build ---
     Create_Bones()
     Create_Ctrls()
     Apply_All_Relations_To_Scene() 
@@ -1807,7 +2313,7 @@ def Build_Full_Rig(*args):
                       defaultButton='OK')
 
 
-# --- (No changes to Export_Rig_Config) ---
+# --- MODIFIED: Export_Rig_Config ---
 def Export_Rig_Config(*args):
     """Export rig configuration to JSON file"""
     print("Export function called!")
@@ -1816,7 +2322,7 @@ def Export_Rig_Config(*args):
     export_data = {
         'parts': parts,
         'parts_config': {},
-        'relations': relations 
+        'relations': relations # This now includes the 'mode'
     }
     
     for part in parts:
@@ -1938,7 +2444,10 @@ def Import_Rig_Config(*args):
                 button=['OK'],
                 defaultButton='OK'
             )
-
+def Get_Relations_For_Part(part_name):
+    """Returns all relations where the given part is a child."""
+    return [rel for rel in relations if rel['child'] == part_name]
+    
 # --- (No changes to Load_Config_Data) ---
 def Load_Config_Data(import_data):
     """
@@ -1951,7 +2460,7 @@ def Load_Config_Data(import_data):
         # Clear existing data
         parts = import_data.get('parts', [])
         parts_attr = {} 
-        relations = import_data.get('relations', []) 
+        relations = import_data.get('relations', []) # This will load relations with 'mode' if present
         
         # Load part configurations
         parts_config = import_data.get('parts_config', {})
@@ -2003,13 +2512,8 @@ def Load_Config_Data(import_data):
                 parts_attr[part]['orient_yValue'] = orientation.get('y', 0.0)
                 parts_attr[part]['orient_zValue'] = orientation.get('z', 0.0)
         
-        # --- MODIFIED: Re-create the entire UI to apply changes ---
-        # This is more robust than trying to patch the existing UI
-        if cmds.window('CarRigToolWindow', exists=True):
-            cmds.deleteUI('CarRigToolWindow')
-        global window
-        window = Create_UI()
-        cmds.showWindow(window)
+        # Use existing Refresh_All_Tabs function
+        Refresh_All_Tabs()
         
     except Exception as e:
         # Re-raise the exception so the calling function can handle it
